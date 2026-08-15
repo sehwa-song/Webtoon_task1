@@ -38,7 +38,10 @@ public class App {
                 }
 
                 if (!isBlank && prevBlank) { // 여백이었다가 여백 끝
-                    System.out.println("여백구간: " + start + " ~ " + (y-1));
+                    int thickness = y - start;
+                    if(thickness >= 30){
+                        System.out.println("여백구간: " + start + " ~ " + (y-1));
+                    }
                 }
 
                 prevBlank = isBlank; // 이번 줄 상태를 "직전"으로 바꾸기
