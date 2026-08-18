@@ -5,7 +5,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-public class App {
+public class Task1Baseline {
     public static void main(String[] args) {
         File dir = new File("images");
 
@@ -31,7 +31,10 @@ public class App {
 
         cutYs.add(0);
 
+
         for(int y=0; y<height;y++){
+            int max = 0;
+            int min = 255;
             boolean isBlank = false;
 
 
@@ -42,15 +45,20 @@ public class App {
                 int g = (rgb >> 8) & 0xFF;
                 int b = rgb & 0xFF;
 
-                int threshold = 240;
-                if (r >= threshold && g >= threshold && b >= threshold) { //분해된 세개의 값이 통과해야 함.
-                    isBlank = true;
-                } else {
-                    isBlank = false;
-                    break;
+
+                int brightness = (r+g+b) / 3; // 색변화(gap)만으로 판단 (흰색 배경도 자동으로 잡힘.)
+
+                if (brightness > max) {
+                    max = brightness;
+                }
+                if (brightness < min) {
+                    min = brightness;
                 }
 
             }
+
+            int gap = max - min;
+            isBlank = (gap < 10);
 
             if (isBlank && !prevBlank) { // 여백 아니었다가 여백 시작
                 start = y;
@@ -58,7 +66,7 @@ public class App {
 
             if (!isBlank && prevBlank) { // 여백이었다가 여백 끝
                 int thickness = y - start;
-                if(thickness >= 30 && start > 0){
+                if(thickness >= 80 && start > 0){
                     System.out.println("여백구간: " + start + " ~ " + (y-1));
                     int cutY = start + (thickness / 2);
                     cutYs.add(cutY);
@@ -66,6 +74,7 @@ public class App {
             }
     
             prevBlank = isBlank; // 이번 줄 상태를 "직전"으로 바꾸기
+
             
         }
 
