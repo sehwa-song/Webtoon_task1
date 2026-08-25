@@ -1,2 +1,10 @@
 images/
 output/
+*.class
+build/
+build-*/
+.build/
+output-*/
+variants/**/.classes/
+variants/**/.smoke-output/
+target/

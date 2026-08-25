@@ -112,7 +112,7 @@ public class Task1Splitter {
         }
     }
 
-    static List<Integer> findCutPoints(BufferedImage image) {
+    static List<Integer> findCutPoints(BufferedImage image) { // 모든 패턴 호출용
         RowAnalysis rows = analyzeRows(image);
         boolean[] strongBlank = closeShortInterruptions(
                 rows.strongBlank, MAX_STRONG_INTERRUPTION);
@@ -149,23 +149,23 @@ public class Task1Splitter {
     private static RowAnalysis analyzeRows(BufferedImage image) {
         int width = image.getWidth();
         int height = image.getHeight();
-        int marginWidth = Math.max(12, width / 20);
-        marginWidth = Math.min(marginWidth, Math.max(1, width / 3));
+        int marginWidth = Math.max(12, width / 20); // 양쪽 끝 배경을 먼저 확인 (최소 조사 폭을 12픽셀로 설정)
+        marginWidth = Math.min(marginWidth, Math.max(1, width / 3)); // margin이 너무 커지지 않게 제한
 
-        RowAnalysis result = new RowAnalysis(height);
-        int[] row = new int[width];
+        RowAnalysis result = new RowAnalysis(height); // 분석 결과를 저장할 객체 생성
+        int[] row = new int[width]; // 현재 행의 픽셀을 저장할 배열 (왜? 전체 이미지의 픽셀을 새 배열에 복사하면 메모리가 커서.. 한 행짜리 배열을 재사용해)
         ColorModeFinder modeFinder = new ColorModeFinder();
         double backgroundDistanceSquared = BACKGROUND_DISTANCE * BACKGROUND_DISTANCE;
 
         for (int y = 0; y < height; y++) {
-            image.getRGB(0, y, width, 1, row, 0, width);
+            image.getRGB(0, y, width, 1, row, 0, width); // 가로로 이미지 전체 너비(width)만큼 읽기 (row 배열 재사용하기 위함)
 
-            RgbColor left = modeFinder.find(row, 0, marginWidth);
-            RgbColor right = modeFinder.find(row, width - marginWidth, width);
-            RgbColor background = RgbColor.average(left, right);
+            RgbColor left = modeFinder.find(row, 0, marginWidth); // 왼쪽 margin 대표 색상 찾기 (조사할 픽셀 배열, 조사 시작 위치, 조사 종료 위치)
+            RgbColor right = modeFinder.find(row, width - marginWidth, width); // 오른쪽 margin 대표 색상
+            RgbColor background = RgbColor.average(left, right); // 양쪽 대표 색상의 평균
 
-            double marginColorDistance = colorDistance(left, right);
-            double leftStdDev = colorStdDev(row, 0, marginWidth);
+            double marginColorDistance = colorDistance(left, right); // 왼쪽과 오른쪽 색상 차이 계산
+            double leftStdDev = colorStdDev(row, 0, marginWidth); // 왼쪽 margin안 픽셀 색상들은 얼마나 비슷한지? (작으면 배경, 크면 그림)
             double rightStdDev = colorStdDev(row, width - marginWidth, width);
 
             int backgroundPixels = 0;
@@ -184,16 +184,16 @@ public class Task1Splitter {
                 int b = rgb & 0xff;
 
                 if (colorDistanceSquared(r, g, b, background) <= backgroundDistanceSquared) {
-                    backgroundPixels++;
+                    backgroundPixels++; // 현재 행의 픽셀이 이 색과 비슷하면 증가시키기.
                     if (x < marginWidth || x >= width - marginWidth) {
-                        matchingMarginPixels++;
+                        matchingMarginPixels++; // 양쪽 margin에서 배경과 비슷한 픽셀 수
                     }
                 }
 
-                sumR += r;
+                sumR += r; // 평균을 구하기 위한 값
                 sumG += g;
                 sumB += b;
-                sumR2 += (long) r * r;
+                sumR2 += (long) r * r; // 색상 변화량을 구하기 위한 값
                 sumG2 += (long) g * g;
                 sumB2 += (long) b * b;
             }
@@ -491,11 +491,11 @@ public class Task1Splitter {
 
 }
 
-final class RowAnalysis {
-        final boolean[] strongBlank;
-        final boolean[] weakBlank;
-        final double[] backgroundRatio;
-        final double[] rowStdDev;
+final class RowAnalysis { // 가로줄의 검사 결과표
+        final boolean[] strongBlank; // 강한 여백인지?
+        final boolean[] weakBlank; 
+        final double[] backgroundRatio; // y의 해당 줄에서 배경과 비슷한 픽셀 비율
+        final double[] rowStdDev; // y의 해당 줄에서 색 변화 정도
 
         RowAnalysis(int height) {
             strongBlank = new boolean[height];
@@ -559,7 +559,7 @@ final class RgbColor {
         }
 }
 
-final class ColorModeFinder {
+final class ColorModeFinder { // 여러 픽셀 중 가장 자주 나타나는 색상 찾기
         private static final int COLOR_BIN_SHIFT = 4;
         private static final int COLOR_BIN_COUNT = 1 << (3 * (8 - COLOR_BIN_SHIFT));
 

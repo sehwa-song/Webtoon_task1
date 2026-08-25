@@ -1,19 +1,26 @@
 import java.awt.image.BufferedImage;
-import java.io.File;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Stream;
+import javax.imageio.ImageIO;
 
 /**
- * 동일한 Task1Splitter 알고리즘을 Direct, Strategy, Visitor,
- * Abstract Factory + Singleton Cache 구조로 실행해 비교한다.
+ * Lightweight, dependency-free benchmark for the isolated design-pattern
+ * implementations.
+ *
+ * <p>This is intentionally not a replacement for JMH. It performs warm-up,
+ * consumes every result, and reports current-thread allocations when the JDK
+ * exposes that counter. Run it in a quiet process and compare several runs.</p>
  */
 public final class PatternBenchmark {
     private static final int DEFAULT_ITERATIONS = 3;
@@ -26,303 +33,462 @@ public final class PatternBenchmark {
 
     public static void main(String[] args) throws Exception {
         BenchmarkOptions options = BenchmarkOptions.parse(args);
+        if (options.help) {
+            printUsage();
+            return;
+        }
+
         List<Path> paths = collectImages(options.input, options.limit);
         if (paths.isEmpty()) {
-            throw new IllegalArgumentException("처리할 이미지가 없습니다: " + options.input);
+            throw new IllegalArgumentException(
+                    "No supported image was found: " + options.input);
         }
 
+        List<LoadedImage> loadedImages = loadImages(paths);
         System.out.printf(Locale.ROOT,
-                "입력=%s, 이미지=%d장, warmup=%d, iterations=%d%n",
-                options.input, paths.size(), options.warmup, options.iterations);
+                "Input=%s, images=%d, warmup=%d, iterations=%d%n",
+                options.input.toAbsolutePath().normalize(),
+                paths.size(),
+                options.warmup,
+                options.iterations);
+        System.out.printf(Locale.ROOT,
+                "Java=%s, OS=%s, processors=%d%n",
+                System.getProperty("java.version"),
+                System.getProperty("os.name"),
+                Runtime.getRuntime().availableProcessors());
 
-        runAlgorithmPatternBenchmark(paths, options);
-        runLoadingAndCacheBenchmark(paths, options);
+        verifyAllCoordinates(loadedImages);
+        runPreloadedAlgorithmBenchmark(loadedImages, options);
+        runFactoryLoadingBenchmark(paths, options);
+
+        System.out.println();
+        System.out.println("Notes:");
+        System.out.println("- Preloaded measurements exclude ImageIO decoding and JPEG output.");
+        System.out.println("- Factory STANDARD includes decoding on every operation.");
+        System.out.println("- Factory CACHED_COLD starts empty; CACHED_WARM is prefilled.");
+        System.out.println("- The OS file cache, JIT and GC can affect results; compare repeated JVM runs.");
     }
 
-    private static void runAlgorithmPatternBenchmark(
-            List<Path> paths, BenchmarkOptions options) throws Exception {
-        WebtoonBatch batch = loadBatch(paths);
-        List<WebtoonPage> pages = batch.pages();
-        DirectSplitter direct = new DirectSplitter();
-        CutPointStrategy strategy = MarginCutPointStrategy.getInstance();
+    private static void verifyAllCoordinates(List<LoadedImage> loadedImages)
+            throws IOException {
+        Map<Path, List<Integer>> expected = new LinkedHashMap<>();
+        Map<Path, BufferedImage> visitorInput = new LinkedHashMap<>();
 
-        verifyEquivalentResults(batch, pages, direct, strategy);
+        for (LoadedImage loaded : loadedImages) {
+            expected.put(loaded.path, Task1Splitter.findCutPoints(loaded.image));
+            visitorInput.put(loaded.path, loaded.image);
+        }
+
+        Map<Path, List<Integer>> visitorResults =
+                variants.visitor.VisitorSplitterApp.analyzeLoadedImages(visitorInput);
+
+        variants.factory.ProcessingFamilyFactory standardFactory =
+                variants.factory.FactorySplitterApp.createFactory(false);
+        variants.factory.CachedProcessingFactory cachedFactory =
+                (variants.factory.CachedProcessingFactory)
+                        variants.factory.FactorySplitterApp.createFactory(true);
+        variants.factory.CutPointDetector factoryDetector =
+                standardFactory.createCutPointDetector();
+        variants.factory.WebtoonProcessingService standardService =
+                new variants.factory.WebtoonProcessingService(standardFactory);
+        variants.factory.WebtoonProcessingService cachedService =
+                new variants.factory.WebtoonProcessingService(cachedFactory);
+
+        cachedFactory.clearCache();
+        for (LoadedImage loaded : loadedImages) {
+            List<Integer> baseline = expected.get(loaded.path);
+            assertSameCuts(
+                    loaded.path,
+                    "STRATEGY",
+                    baseline,
+                    variants.strategy.StrategySplitterApp.findCutPoints(loaded.image));
+            assertSameCuts(
+                    loaded.path,
+                    "VISITOR",
+                    baseline,
+                    visitorResults.get(loaded.path));
+            assertSameCuts(
+                    loaded.path,
+                    "FACTORY_PRELOADED_DETECTOR",
+                    baseline,
+                    factoryDetector.findCutPoints(loaded.image));
+            assertSameCuts(
+                    loaded.path,
+                    "FACTORY_STANDARD",
+                    baseline,
+                    standardService.detect(loaded.path));
+            assertSameCuts(
+                    loaded.path,
+                    "FACTORY_CACHED",
+                    baseline,
+                    cachedService.detect(loaded.path));
+        }
+        cachedFactory.clearCache();
+
+        System.out.printf(Locale.ROOT,
+                "Coordinate verification: PASS (%d images, baseline = strategy = visitor "
+                        + "= factory standard = factory cached)%n",
+                loadedImages.size());
+    }
+
+    private static void assertSameCuts(
+            Path path,
+            String implementation,
+            List<Integer> expected,
+            List<Integer> actual) {
+        if (actual == null || !expected.equals(actual)) {
+            throw new IllegalStateException(
+                    "Cut coordinates differ for " + implementation + " at " + path
+                            + System.lineSeparator() + "expected=" + expected
+                            + System.lineSeparator() + "actual=" + actual);
+        }
+    }
+
+    private static void runPreloadedAlgorithmBenchmark(
+            List<LoadedImage> loadedImages,
+            BenchmarkOptions options) throws Exception {
+        List<BufferedImage> mutableImages = new ArrayList<>();
+        for (LoadedImage loaded : loadedImages) {
+            mutableImages.add(loaded.image);
+        }
+        final List<BufferedImage> images =
+                Collections.unmodifiableList(mutableImages);
+
+        variants.factory.CutPointDetector factoryDetector =
+                variants.factory.FactorySplitterApp.createFactory(false)
+                        .createCutPointDetector();
 
         for (int i = 0; i < options.warmup; i++) {
-            blackhole ^= runDirect(pages, direct, 1);
-            blackhole ^= runStrategy(pages, strategy, 1);
-            blackhole ^= runVisitor(batch, strategy, 1);
+            consume(runBaseline(images, 1));
+            consume(runStrategy(images, 1));
+            consume(variants.visitor.VisitorSplitterApp.benchmarkLoadedImages(images, 1));
+            consume(runFactoryDetector(images, factoryDetector, 1));
         }
 
-        int operations = pages.size() * options.iterations;
+        long operations = Math.multiplyExact(
+                (long) images.size(), (long) options.iterations);
         List<Measurement> measurements = new ArrayList<>();
         measurements.add(measure(
-                "DIRECT",
+                "BASELINE_TASK1SPLITTER",
                 operations,
-                () -> runDirect(pages, direct, options.iterations)));
+                () -> runBaseline(images, options.iterations)));
         measurements.add(measure(
-                "STRATEGY_SINGLETON",
+                "STRATEGY_PUBLIC_API",
                 operations,
-                () -> runStrategy(pages, strategy, options.iterations)));
+                () -> runStrategy(images, options.iterations)));
         measurements.add(measure(
-                "VISITOR",
+                "VISITOR_PUBLIC_API",
                 operations,
-                () -> runVisitor(batch, strategy, options.iterations)));
+                () -> variants.visitor.VisitorSplitterApp
+                        .benchmarkLoadedImages(images, options.iterations)));
+        measurements.add(measure(
+                "FACTORY_DETECTOR_PRODUCT",
+                operations,
+                () -> runFactoryDetector(
+                        images, factoryDetector, options.iterations)));
 
         System.out.println();
-        System.out.println("[A] 사전 로드된 동일 BufferedImage의 컷 검출 비교");
+        System.out.println("[A] PRELOADED ALGORITHM / PATTERN PATH");
+        System.out.println("    Same BufferedImage objects; file loading and output are excluded.");
         printMeasurements(measurements);
-        System.out.println("검증: Direct = Strategy = Visitor의 cut Y 결과가 모두 같습니다.");
     }
 
-    private static void runLoadingAndCacheBenchmark(
-            List<Path> paths, BenchmarkOptions options) throws Exception {
-        ProcessingComponentFactory standardFactory = new StandardProcessingFactory();
-        ProcessingComponentFactory cachedFactory = new CachedProcessingFactory();
-        WebtoonProcessingService standard = new WebtoonProcessingService(standardFactory);
-        WebtoonProcessingService cached = new WebtoonProcessingService(cachedFactory);
-        SingletonImageRepository cache = SingletonImageRepository.getInstance();
+    private static long runBaseline(List<BufferedImage> images, int repetitions) {
+        long checksum = 1L;
+        for (int repetition = 0; repetition < repetitions; repetition++) {
+            for (BufferedImage image : images) {
+                List<Integer> cuts = Task1Splitter.findCutPoints(image);
+                checksum = 31L * checksum + cuts.hashCode();
+            }
+        }
+        return checksum;
+    }
 
-        if (paths.size() > cache.capacity()) {
+    private static long runStrategy(List<BufferedImage> images, int repetitions) {
+        long checksum = 1L;
+        for (int repetition = 0; repetition < repetitions; repetition++) {
+            for (BufferedImage image : images) {
+                List<Integer> cuts =
+                        variants.strategy.StrategySplitterApp.findCutPoints(image);
+                checksum = 31L * checksum + cuts.hashCode();
+            }
+        }
+        return checksum;
+    }
+
+    private static long runFactoryDetector(
+            List<BufferedImage> images,
+            variants.factory.CutPointDetector detector,
+            int repetitions) {
+        long checksum = 1L;
+        for (int repetition = 0; repetition < repetitions; repetition++) {
+            for (BufferedImage image : images) {
+                List<Integer> cuts = detector.findCutPoints(image);
+                checksum = 31L * checksum + cuts.hashCode();
+            }
+        }
+        return checksum;
+    }
+
+    private static void runFactoryLoadingBenchmark(
+            List<Path> allPaths, BenchmarkOptions options) throws Exception {
+        variants.factory.ProcessingFamilyFactory standardFactory =
+                variants.factory.FactorySplitterApp.createFactory(false);
+        variants.factory.CachedProcessingFactory cachedFactory =
+                (variants.factory.CachedProcessingFactory)
+                        variants.factory.FactorySplitterApp.createFactory(true);
+
+        cachedFactory.clearCache();
+        int capacity = cachedFactory.cacheSnapshot().capacity();
+        int workingSetSize = Math.min(allPaths.size(), capacity);
+        List<Path> paths = Collections.unmodifiableList(
+                new ArrayList<>(allPaths.subList(0, workingSetSize)));
+
+        if (workingSetSize < allPaths.size()) {
             System.out.printf(Locale.ROOT,
-                    "주의: 이미지 %d장이 캐시 용량 %d보다 많아 warm 측정에도 LRU miss가 생깁니다.%n"
-                            + "      -Dwebtoon.cache.maxEntries=%d 이상으로 실행하면 전부 유지됩니다.%n",
-                    paths.size(), cache.capacity(), paths.size());
+                    "Factory warm working set reduced from %d to cache capacity %d. "
+                            + "Use -Dvariants.factory.cache.maxEntries=%d to include all.%n",
+                    allPaths.size(), capacity, allPaths.size());
         }
 
-        // 클래스 로딩과 JIT 영향을 timed 구간 밖으로 보낸다.
-        standard.process(paths, 1);
-        cache.clear();
-        cached.process(paths, 1);
-        cache.clear();
+        // Warm classes, JIT paths, and ImageIO outside every timed section.
+        for (int i = 0; i < options.warmup; i++) {
+            consume(variants.factory.FactoryBenchmark
+                    .run(standardFactory, paths, 1).checksum());
+            cachedFactory.clearCache();
+            consume(variants.factory.FactoryBenchmark
+                    .run(cachedFactory, paths, 1).checksum());
+            consume(variants.factory.FactoryBenchmark
+                    .run(cachedFactory, paths, 1).checksum());
+        }
 
-        int repeatedOperations = paths.size() * options.iterations;
-        Measurement noCache = measure(
-                standardFactory.name(),
+        long repeatedOperations = Math.multiplyExact(
+                (long) paths.size(), (long) options.iterations);
+        Measurement standard = measure(
+                "FACTORY_STANDARD_DISK",
                 repeatedOperations,
-                () -> standard.process(paths, options.iterations));
+                () -> variants.factory.FactoryBenchmark
+                        .run(standardFactory, paths, options.iterations)
+                        .checksum());
 
-        cache.clear();
-        forceGc();
-        long heapBeforeCache = usedHeapBytes();
-        Measurement cacheCold = measure(
-                cachedFactory.name() + "_COLD",
+        // Cold means an empty application cache and exactly one traversal.
+        cachedFactory.clearCache();
+        Measurement cachedCold = measure(
+                "FACTORY_CACHED_COLD",
                 paths.size(),
-                () -> cached.process(paths, 1));
-        forceGc();
-        long retainedByCache = Math.max(0L, usedHeapBytes() - heapBeforeCache);
+                () -> variants.factory.FactoryBenchmark
+                        .run(cachedFactory, paths, 1)
+                        .checksum());
+        variants.factory.CachedProcessingFactory.CacheSnapshot coldSnapshot =
+                cachedFactory.cacheSnapshot();
+        if (coldSnapshot.hits() != 0L
+                || coldSnapshot.misses() != paths.size()) {
+            throw new IllegalStateException(
+                    "Cold cache invariant failed: " + coldSnapshot);
+        }
 
-        long hitsBeforeWarm = cache.hitCount();
-        long missesBeforeWarm = cache.missCount();
-        Measurement cacheWarm = measure(
-                cachedFactory.name() + "_WARM",
+        // Fill outside the timer, then measure only cache hits plus detection.
+        cachedFactory.clearCache();
+        consume(variants.factory.FactoryBenchmark
+                .run(cachedFactory, paths, 1).checksum());
+        variants.factory.CachedProcessingFactory.CacheSnapshot beforeWarm =
+                cachedFactory.cacheSnapshot();
+        Measurement cachedWarm = measure(
+                "FACTORY_CACHED_WARM",
                 repeatedOperations,
-                () -> cached.process(paths, options.iterations));
-        long warmHits = cache.hitCount() - hitsBeforeWarm;
-        long warmMisses = cache.missCount() - missesBeforeWarm;
+                () -> variants.factory.FactoryBenchmark
+                        .run(cachedFactory, paths, options.iterations)
+                        .checksum());
+        variants.factory.CachedProcessingFactory.CacheSnapshot afterWarm =
+                cachedFactory.cacheSnapshot();
+
+        long warmHits = afterWarm.hits() - beforeWarm.hits();
+        long warmMisses = afterWarm.misses() - beforeWarm.misses();
+        if (warmHits != repeatedOperations || warmMisses != 0L) {
+            throw new IllegalStateException(
+                    "Warm cache invariant failed: hits=" + warmHits
+                            + ", misses=" + warmMisses
+                            + ", expected hits=" + repeatedOperations);
+        }
+        if (standard.checksum != cachedWarm.checksum) {
+            throw new IllegalStateException(
+                    "Factory STANDARD and CACHED_WARM checksums differ");
+        }
 
         System.out.println();
-        System.out.println("[B] 이미지 로딩 + 컷 검출 비교 (파일 출력 제외)");
-        printMeasurements(Arrays.asList(noCache, cacheCold, cacheWarm));
+        System.out.println("[B] FACTORY LOAD + DETECT (JPEG output excluded)");
         System.out.printf(Locale.ROOT,
-                "Singleton LRU cache: entries=%d/%d, warm hits=%d, warm misses=%d, "
-                        + "pixel bytes=%.2f MiB, 추정 retained heap=%.2f MiB%n",
-                cache.size(), cache.capacity(), warmHits, warmMisses,
-                bytesToMiB(cache.estimatedPixelBytes()),
-                bytesToMiB(retainedByCache));
-        System.out.println("참고: OS 파일 캐시와 GC 상태 때문에 시간·retained heap은 실행마다 달라집니다.");
+                "    Working set=%d, cache capacity=%d%n",
+                paths.size(), capacity);
+        printMeasurements(asList(standard, cachedCold, cachedWarm));
+        System.out.printf(Locale.ROOT,
+                "    COLD cache : hits=%d, misses=%d, evictions=%d%n",
+                coldSnapshot.hits(),
+                coldSnapshot.misses(),
+                coldSnapshot.evictions());
+        System.out.printf(Locale.ROOT,
+                "    WARM timed : hits=%d, misses=%d, retained entries=%d, "
+                        + "estimated pixels=%.2f MiB%n",
+                warmHits,
+                warmMisses,
+                afterWarm.size(),
+                bytesToMiB(afterWarm.estimatedPixelBytes()));
 
-        cache.clear();
+        cachedFactory.clearCache();
     }
 
-    private static WebtoonBatch loadBatch(List<Path> paths) throws IOException {
-        ImageRepository loader = new DiskImageRepository();
-        Map<String, List<WebtoonPage>> pagesByEpisode = new LinkedHashMap<>();
-
-        for (Path path : paths) {
-            Path parent = path.getParent();
-            String episodeName = parent == null
-                    ? "root"
-                    : parent.getFileName().toString();
-            pagesByEpisode.computeIfAbsent(episodeName, ignored -> new ArrayList<>())
-                    .add(new WebtoonPage(path, loader.load(path)));
-        }
-
-        List<WebtoonEpisode> episodes = new ArrayList<>();
-        for (Map.Entry<String, List<WebtoonPage>> entry : pagesByEpisode.entrySet()) {
-            episodes.add(new WebtoonEpisode(entry.getKey(), entry.getValue()));
-        }
-        return new WebtoonBatch(episodes);
-    }
-
-    private static void verifyEquivalentResults(
-            WebtoonBatch batch,
-            List<WebtoonPage> pages,
-            DirectSplitter directSplitter,
-            CutPointStrategy strategy) {
-        Map<Path, List<Integer>> directResults = new LinkedHashMap<>();
-
-        for (WebtoonPage page : pages) {
-            List<Integer> direct = directSplitter.findCutPoints(page.image());
-            List<Integer> strategic = strategy.findCutPoints(page.image());
-            if (!direct.equals(strategic)) {
-                throw new IllegalStateException(
-                        "Direct/Strategy 결과 불일치: " + page.path());
-            }
-            directResults.put(page.path(), direct);
-        }
-
-        CutAnalysisVisitor visitor = new CutAnalysisVisitor(strategy);
-        batch.accept(visitor);
-        if (!directResults.equals(visitor.results())) {
-            throw new IllegalStateException("Direct/Visitor 결과가 일치하지 않습니다.");
-        }
-    }
-
-    private static long runDirect(
-            List<WebtoonPage> pages,
-            DirectSplitter directSplitter,
-            int repetitions) {
-        long checksum = 1;
-        for (int repetition = 0; repetition < repetitions; repetition++) {
-            for (WebtoonPage page : pages) {
-                List<Integer> cuts = directSplitter.findCutPoints(page.image());
-                checksum = 31 * checksum + cuts.hashCode();
-            }
-        }
-        return checksum;
-    }
-
-    private static long runStrategy(
-            List<WebtoonPage> pages,
-            CutPointStrategy strategy,
-            int repetitions) {
-        long checksum = 1;
-        for (int repetition = 0; repetition < repetitions; repetition++) {
-            for (WebtoonPage page : pages) {
-                List<Integer> cuts = strategy.findCutPoints(page.image());
-                checksum = 31 * checksum + cuts.hashCode();
-            }
-        }
-        return checksum;
-    }
-
-    private static long runVisitor(
-            WebtoonBatch batch,
-            CutPointStrategy strategy,
-            int repetitions) {
-        long checksum = 1;
-        for (int repetition = 0; repetition < repetitions; repetition++) {
-            CutAnalysisVisitor visitor = new CutAnalysisVisitor(strategy);
-            batch.accept(visitor);
-            checksum = 31 * checksum + visitor.checksum();
-        }
-        return checksum;
+    private static List<Measurement> asList(
+            Measurement first, Measurement second, Measurement third) {
+        List<Measurement> result = new ArrayList<>();
+        result.add(first);
+        result.add(second);
+        result.add(third);
+        return result;
     }
 
     private static Measurement measure(
-            String name, int operations, CheckedLongTask task) throws Exception {
-        forceGc();
+            String name, long operations, CheckedLongTask task) throws Exception {
+        forceGcOutsideTimedSection();
         long allocatedBefore = allocatedBytesForCurrentThread();
         long started = System.nanoTime();
         long checksum = task.run();
         long elapsed = System.nanoTime() - started;
         long allocatedAfter = allocatedBytesForCurrentThread();
-        blackhole = checksum;
+        consume(checksum);
 
-        long allocated = allocatedBefore < 0 || allocatedAfter < 0
-                ? -1
-                : Math.max(0, allocatedAfter - allocatedBefore);
+        long allocated = allocatedBefore < 0L || allocatedAfter < 0L
+                ? -1L
+                : Math.max(0L, allocatedAfter - allocatedBefore);
         return new Measurement(name, operations, elapsed, allocated, checksum);
     }
 
     private static void printMeasurements(List<Measurement> measurements) {
-        System.out.printf("%-38s %12s %14s %16s%n",
-                "구현", "총 시간(ms)", "이미지당(ms)", "할당(MiB/image)");
+        System.out.printf(Locale.ROOT,
+                "%-28s %9s %13s %14s %18s%n",
+                "implementation",
+                "operations",
+                "total(ms)",
+                "ms/image",
+                "allocated(MiB/img)");
         for (Measurement measurement : measurements) {
-            String allocated = measurement.allocatedBytes < 0
+            String allocationPerImage = measurement.allocatedBytes < 0L
                     ? "N/A"
-                    : String.format(Locale.ROOT, "%.3f",
+                    : String.format(Locale.ROOT, "%.4f",
                             bytesToMiB(measurement.allocatedBytes)
                                     / measurement.operations);
-            System.out.printf(Locale.ROOT, "%-38s %12.3f %14.3f %16s%n",
+            System.out.printf(Locale.ROOT,
+                    "%-28s %9d %13.3f %14.4f %18s%n",
                     measurement.name,
+                    measurement.operations,
                     measurement.elapsedNanos / 1_000_000.0,
-                    measurement.elapsedNanos / 1_000_000.0 / measurement.operations,
-                    allocated);
+                    measurement.elapsedNanos / 1_000_000.0
+                            / measurement.operations,
+                    allocationPerImage);
         }
     }
 
-    private static List<Path> collectImages(Path input, int limit) {
-        List<File> files = new ArrayList<>();
-        collectImageFiles(input.toFile(), files);
-        files.sort(Comparator.comparing(File::getPath));
+    private static List<Path> collectImages(Path input, int limit)
+            throws IOException {
+        Path normalized = input.toAbsolutePath().normalize();
+        List<Path> found = new ArrayList<>();
 
-        List<Path> paths = new ArrayList<>();
-        for (File file : files) {
-            if (paths.size() == limit) {
-                break;
+        if (Files.isRegularFile(normalized)) {
+            if (isSupportedImage(normalized)) {
+                found.add(normalized);
             }
-            paths.add(file.toPath().toAbsolutePath().normalize());
+        } else if (Files.isDirectory(normalized)) {
+            try (Stream<Path> stream = Files.walk(normalized)) {
+                stream.filter(Files::isRegularFile)
+                        .filter(PatternBenchmark::isSupportedImage)
+                        .map(path -> path.toAbsolutePath().normalize())
+                        .forEach(found::add);
+            }
         }
-        return paths;
+
+        found.sort(Comparator.comparing(Path::toString));
+        if (found.size() > limit) {
+            found = new ArrayList<>(found.subList(0, limit));
+        }
+        return Collections.unmodifiableList(found);
     }
 
-    private static void collectImageFiles(File input, List<File> result) {
-        if (input.isFile()) {
-            String name = input.getName().toLowerCase(Locale.ROOT);
-            if (name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png")) {
-                result.add(input);
-            }
-            return;
+    private static boolean isSupportedImage(Path path) {
+        Path name = path.getFileName();
+        if (name == null) {
+            return false;
         }
+        String lower = name.toString().toLowerCase(Locale.ROOT);
+        return lower.endsWith(".jpg")
+                || lower.endsWith(".jpeg")
+                || lower.endsWith(".png");
+    }
 
-        File[] children = input.listFiles();
-        if (children == null) {
-            return;
+    private static List<LoadedImage> loadImages(List<Path> paths)
+            throws IOException {
+        List<LoadedImage> loaded = new ArrayList<>();
+        for (Path path : paths) {
+            BufferedImage image = ImageIO.read(path.toFile());
+            if (image == null) {
+                throw new IOException("Unsupported or damaged image: " + path);
+            }
+            loaded.add(new LoadedImage(path, image));
         }
-        Arrays.sort(children, Comparator.comparing(File::getName));
-        for (File child : children) {
-            collectImageFiles(child, result);
-        }
+        return Collections.unmodifiableList(loaded);
     }
 
     private static com.sun.management.ThreadMXBean allocationBean() {
-        java.lang.management.ThreadMXBean bean = ManagementFactory.getThreadMXBean();
-        if (!(bean instanceof com.sun.management.ThreadMXBean)) {
+        java.lang.management.ThreadMXBean standardBean =
+                ManagementFactory.getThreadMXBean();
+        if (!(standardBean instanceof com.sun.management.ThreadMXBean)) {
             return null;
         }
-        com.sun.management.ThreadMXBean allocationBean =
-                (com.sun.management.ThreadMXBean) bean;
-        if (!allocationBean.isThreadAllocatedMemorySupported()) {
+
+        com.sun.management.ThreadMXBean bean =
+                (com.sun.management.ThreadMXBean) standardBean;
+        try {
+            if (!bean.isThreadAllocatedMemorySupported()) {
+                return null;
+            }
+            if (!bean.isThreadAllocatedMemoryEnabled()) {
+                bean.setThreadAllocatedMemoryEnabled(true);
+            }
+            return bean;
+        } catch (RuntimeException | LinkageError unavailable) {
             return null;
         }
-        if (!allocationBean.isThreadAllocatedMemoryEnabled()) {
-            allocationBean.setThreadAllocatedMemoryEnabled(true);
-        }
-        return allocationBean;
     }
 
     @SuppressWarnings("deprecation")
     private static long allocatedBytesForCurrentThread() {
         com.sun.management.ThreadMXBean bean = AllocationBeanHolder.INSTANCE;
         return bean == null
-                ? -1
+                ? -1L
                 : bean.getThreadAllocatedBytes(Thread.currentThread().getId());
     }
 
-    private static long usedHeapBytes() {
-        Runtime runtime = Runtime.getRuntime();
-        return runtime.totalMemory() - runtime.freeMemory();
+    private static void forceGcOutsideTimedSection() throws InterruptedException {
+        System.gc();
+        Thread.sleep(50L);
     }
 
-    private static void forceGc() throws InterruptedException {
-        System.gc();
-        Thread.sleep(75L);
+    private static void consume(long value) {
+        blackhole = 31L * blackhole + value;
     }
 
     private static double bytesToMiB(long bytes) {
         return bytes / (1024.0 * 1024.0);
+    }
+
+    private static void printUsage() {
+        System.out.println("Usage: java PatternBenchmark [options] [FILE_OR_DIR]");
+        System.out.println("  --input=PATH       input image or directory");
+        System.out.println("  --iterations=N    timed repetitions per image (default 3)");
+        System.out.println("  --repetitions=N   alias for --iterations");
+        System.out.println("  --warmup=N        untimed repetitions (default 2)");
+        System.out.println("  --limit=N         maximum input images (default 3)");
+        System.out.println("  --help             show this message");
+        System.out.println("Cache capacity can be set before startup with:");
+        System.out.println("  -Dvariants.factory.cache.maxEntries=N");
     }
 
     @FunctionalInterface
@@ -331,19 +497,30 @@ public final class PatternBenchmark {
     }
 
     private static final class AllocationBeanHolder {
-        private static final com.sun.management.ThreadMXBean INSTANCE = allocationBean();
+        private static final com.sun.management.ThreadMXBean INSTANCE =
+                allocationBean();
+    }
+
+    private static final class LoadedImage {
+        private final Path path;
+        private final BufferedImage image;
+
+        private LoadedImage(Path path, BufferedImage image) {
+            this.path = path;
+            this.image = image;
+        }
     }
 
     private static final class Measurement {
-        final String name;
-        final int operations;
-        final long elapsedNanos;
-        final long allocatedBytes;
-        final long checksum;
+        private final String name;
+        private final long operations;
+        private final long elapsedNanos;
+        private final long allocatedBytes;
+        private final long checksum;
 
-        Measurement(
+        private Measurement(
                 String name,
-                int operations,
+                long operations,
                 long elapsedNanos,
                 long allocatedBytes,
                 long checksum) {
@@ -356,56 +533,86 @@ public final class PatternBenchmark {
     }
 
     private static final class BenchmarkOptions {
-        final Path input;
-        final int iterations;
-        final int warmup;
-        final int limit;
+        private final Path input;
+        private final int iterations;
+        private final int warmup;
+        private final int limit;
+        private final boolean help;
 
-        BenchmarkOptions(Path input, int iterations, int warmup, int limit) {
+        private BenchmarkOptions(
+                Path input,
+                int iterations,
+                int warmup,
+                int limit,
+                boolean help) {
             this.input = input;
             this.iterations = iterations;
             this.warmup = warmup;
             this.limit = limit;
+            this.help = help;
         }
 
-        static BenchmarkOptions parse(String[] args) {
-            Path input = new File("images/002/005.jpg").toPath();
+        private static BenchmarkOptions parse(String[] args) {
+            Path input = Paths.get("images", "002", "005.jpg");
             int iterations = DEFAULT_ITERATIONS;
             int warmup = DEFAULT_WARMUP;
             int limit = DEFAULT_LIMIT;
+            boolean help = false;
 
             for (String arg : args) {
                 if (arg.startsWith("--input=")) {
-                    input = new File(arg.substring("--input=".length())).toPath();
+                    input = requiredPath(arg, "--input=");
                 } else if (arg.startsWith("--iterations=")) {
                     iterations = positiveInt(arg, "--iterations=");
+                } else if (arg.startsWith("--repetitions=")) {
+                    iterations = positiveInt(arg, "--repetitions=");
                 } else if (arg.startsWith("--warmup=")) {
                     warmup = nonNegativeInt(arg, "--warmup=");
                 } else if (arg.startsWith("--limit=")) {
                     limit = positiveInt(arg, "--limit=");
-                } else if (!arg.startsWith("--")) {
-                    input = new File(arg).toPath();
+                } else if ("--help".equals(arg) || "-h".equals(arg)) {
+                    help = true;
+                } else if (arg.startsWith("--")) {
+                    throw new IllegalArgumentException("Unknown option: " + arg);
                 } else {
-                    throw new IllegalArgumentException("알 수 없는 옵션: " + arg);
+                    input = Paths.get(arg);
                 }
             }
-            return new BenchmarkOptions(input, iterations, warmup, limit);
+            return new BenchmarkOptions(input, iterations, warmup, limit, help);
+        }
+
+        private static Path requiredPath(String arg, String prefix) {
+            String value = arg.substring(prefix.length());
+            if (value.isEmpty()) {
+                throw new IllegalArgumentException(prefix + " requires a path");
+            }
+            return Paths.get(value);
         }
 
         private static int positiveInt(String arg, String prefix) {
-            int value = Integer.parseInt(arg.substring(prefix.length()));
+            int value = parseInt(arg, prefix);
             if (value <= 0) {
-                throw new IllegalArgumentException(prefix + " 값은 1 이상이어야 합니다.");
+                throw new IllegalArgumentException(prefix + " must be at least 1");
             }
             return value;
         }
 
         private static int nonNegativeInt(String arg, String prefix) {
-            int value = Integer.parseInt(arg.substring(prefix.length()));
+            int value = parseInt(arg, prefix);
             if (value < 0) {
-                throw new IllegalArgumentException(prefix + " 값은 0 이상이어야 합니다.");
+                throw new IllegalArgumentException(prefix + " must be at least 0");
             }
             return value;
+        }
+
+        private static int parseInt(String arg, String prefix) {
+            String text = arg.substring(prefix.length());
+            try {
+                return Integer.parseInt(text);
+            } catch (NumberFormatException invalid) {
+                throw new IllegalArgumentException(
+                        prefix + " requires an integer: " + text, invalid);
+            }
         }
     }
 }
