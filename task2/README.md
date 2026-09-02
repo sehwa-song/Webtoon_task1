@@ -1,5 +1,7 @@
 # Task2: 실제 콘텐츠만 추출하기
 
+> Task1과 Task2의 패턴별 핵심 클래스 관계 그림: [웹툰 처리 디자인 패턴 관계도](../docs/design-pattern-diagrams.md)
+
 Task1은 긴 웹툰을 **여백의 가운데 좌표에서 나누는 작업**이다. 반면 Task2는
 버려도 안전한 여백의 범위를 찾은 뒤 그 범위를 출력에서 제외하고,
 실제 그림·말풍선·글자가 있는 콘텐츠 구간만 각각의 JPEG로 저장한다.
@@ -13,6 +15,10 @@ Task1은 긴 웹툰을 **여백의 가운데 좌표에서 나누는 작업**이�
 |---|---|---|---|
 | Baseline | `task2.baseline.Task2Baseline` | 디자인 패턴 없이 한 흐름으로 구현 | `baseline/Task2Baseline.java` |
 | Strategy | `task2.variants.strategy.StrategyExtractorApp` | Strategy | `strategy/MarginContentRegionStrategy.java` |
+| Template | `task2.variants.template.TemplateExtractorApp` | Template Method | `template/RgbMarginTemplateExtractor.java` |
+| Chain | `task2.variants.chain.ChainExtractorApp` | Chain of Responsibility | `chain/ChainContentRegionDetector.java` |
+| Decorator | `task2.variants.decorator.DecoratorExtractorApp` | Decorator | `decorator/RgbMarginContentRegionDetector.java` |
+| Proxy | `task2.variants.proxy.ProxyExtractorApp` | Proxy + LRU Cache | `proxy/CachingImageRepositoryProxy.java` |
 | Visitor | `task2.variants.visitor.VisitorExtractorApp` | Visitor + Composite | `visitor/VisitorContentAlgorithm.java` |
 | Factory | `task2.variants.factory.FactoryExtractorApp` | Abstract Factory + Singleton LRU Cache | `factory/RgbMarginContentRegionDetector.java` |
 

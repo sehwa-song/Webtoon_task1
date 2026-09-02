@@ -11,9 +11,13 @@ import java.util.List;
 import java.util.Locale;
 import javax.imageio.ImageIO;
 import task2.baseline.Task2Baseline;
+import task2.variants.chain.ChainExtractorApp;
+import task2.variants.decorator.DecoratorExtractorApp;
 import task2.variants.factory.StandardProcessingFactory;
 import task2.variants.factory.WebtoonExtractionService;
+import task2.variants.proxy.ProxyExtractorApp;
 import task2.variants.strategy.StrategyExtractorApp;
+import task2.variants.template.TemplateExtractorApp;
 import task2.variants.visitor.VisitorExtractorApp;
 
 /**
@@ -60,10 +64,18 @@ public final class Task2EquivalenceCheck {
 
             String baseline = baselineSignature(image);
             String strategy = strategySignature(image);
+            String template = templateSignature(image);
+            String chain = chainSignature(image);
+            String decorator = decoratorSignature(image);
+            String proxy = proxySignature(image);
             String visitor = visitorSignature(image);
             String factory = factorySignature(factoryService, image);
 
             requireSame(imageFile, "Strategy", baseline, strategy);
+            requireSame(imageFile, "Template Method", baseline, template);
+            requireSame(imageFile, "Chain of Responsibility", baseline, chain);
+            requireSame(imageFile, "Decorator", baseline, decorator);
+            requireSame(imageFile, "Proxy", baseline, proxy);
             requireSame(imageFile, "Visitor+Composite", baseline, visitor);
             requireSame(imageFile, "Abstract Factory", baseline, factory);
             checked++;
@@ -71,7 +83,7 @@ public final class Task2EquivalenceCheck {
 
         System.out.println(
                 "PASS: " + checked
-                        + "개 이미지에서 Baseline / Strategy / Visitor / Factory의"
+                        + "개 이미지에서 Baseline과 7개 디자인 패턴 구현의"
                         + " 콘텐츠 범위가 모두 같습니다.");
     }
 
@@ -86,6 +98,54 @@ public final class Task2EquivalenceCheck {
         List<task2.variants.strategy.ContentRegion> regions =
                 StrategyExtractorApp.findContentRegions(image);
         validateStrategy(regions, image.getHeight());
+        return regions.toString();
+    }
+
+    private static String templateSignature(BufferedImage image) {
+        List<task2.variants.template.ContentRegion> regions =
+                TemplateExtractorApp.findContentRegions(image);
+        int previousBottom = 0;
+        for (task2.variants.template.ContentRegion region : regions) {
+            previousBottom = validateRange(
+                    region.top(), region.bottomExclusive(),
+                    previousBottom, image.getHeight());
+        }
+        return regions.toString();
+    }
+
+    private static String chainSignature(BufferedImage image) {
+        List<task2.variants.chain.ContentRegion> regions =
+                ChainExtractorApp.findContentRegions(image);
+        int previousBottom = 0;
+        for (task2.variants.chain.ContentRegion region : regions) {
+            previousBottom = validateRange(
+                    region.top(), region.bottomExclusive(),
+                    previousBottom, image.getHeight());
+        }
+        return regions.toString();
+    }
+
+    private static String decoratorSignature(BufferedImage image) {
+        List<task2.variants.decorator.ContentRegion> regions =
+                DecoratorExtractorApp.findContentRegions(image);
+        int previousBottom = 0;
+        for (task2.variants.decorator.ContentRegion region : regions) {
+            previousBottom = validateRange(
+                    region.top(), region.bottomExclusive(),
+                    previousBottom, image.getHeight());
+        }
+        return regions.toString();
+    }
+
+    private static String proxySignature(BufferedImage image) {
+        List<task2.variants.proxy.ContentRegion> regions =
+                ProxyExtractorApp.findContentRegions(image);
+        int previousBottom = 0;
+        for (task2.variants.proxy.ContentRegion region : regions) {
+            previousBottom = validateRange(
+                    region.top(), region.bottomExclusive(),
+                    previousBottom, image.getHeight());
+        }
         return regions.toString();
     }
 

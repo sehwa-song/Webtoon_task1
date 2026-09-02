@@ -1,5 +1,7 @@
 # Task1 디자인패턴별 독립 구현
 
+> 패턴별 핵심 클래스 관계 그림: [웹툰 처리 디자인 패턴 관계도](../docs/design-pattern-diagrams.md)
+
 `Task1LearningBaseline.java`의 웹툰 컷 분할 규칙을 바탕으로 다음 7개
 디자인패턴을 각각 독립 패키지로 구현했다.
 
